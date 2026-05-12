@@ -465,24 +465,88 @@ const BANK_TYPES = ['活存','定存','數位帳戶'];
 const INVEST_TYPES = ['股票','ETF','基金','債券','其他'];
 
 // ========== STATE ==========
-let records = JSON.parse(localStorage.getItem('juanRecords') || '[]');
-let assets = JSON.parse(localStorage.getItem('juanAssets') || '[]');
+let records = [];
+let assets = [];
 let currentType = '支出';
 let selectedCategory = '';
 let selectedPayment = '';
 let viewYear, viewMonth;
 let editingAssetId = null;
+let db = null;
 
 const now = new Date();
 viewYear = now.getFullYear();
 viewMonth = now.getMonth();
 
+// ========== IndexedDB (主要儲存) + localStorage (備援) ==========
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('JuanFinanceDB', 1);
+    req.onupgradeneeded = (e) => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('data')) d.createObjectStore('data');
+    };
+    req.onsuccess = (e) => { db = e.target.result; resolve(db); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function idbSave(key, value) {
+  return new Promise((resolve) => {
+    if (!db) { resolve(); return; }
+    try {
+      const tx = db.transaction('data', 'readwrite');
+      tx.objectStore('data').put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch(e) { resolve(); }
+  });
+}
+
+function idbLoad(key) {
+  return new Promise((resolve) => {
+    if (!db) { resolve(null); return; }
+    try {
+      const tx = db.transaction('data', 'readonly');
+      const req = tx.objectStore('data').get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    } catch(e) { resolve(null); }
+  });
+}
+
 // ========== INIT ==========
-function init() {
+async function init() {
+  // 1. 先嘗試開 IndexedDB
+  try { await openDB(); } catch(e) { console.log('IndexedDB not available'); }
+
+  // 2. 從 IndexedDB 讀取（優先）
+  const idbRecords = await idbLoad('records');
+  const idbAssets = await idbLoad('assets');
+
+  // 3. 從 localStorage 讀取（備援）
+  let lsRecords = [], lsAssets = [];
+  try {
+    lsRecords = JSON.parse(localStorage.getItem('juanRecords') || '[]');
+    lsAssets = JSON.parse(localStorage.getItem('juanAssets') || '[]');
+  } catch(e) {}
+
+  // 4. 用資料筆數多的那個（防止任一邊被清空）
+  records = (idbRecords && idbRecords.length >= lsRecords.length) ? idbRecords : lsRecords;
+  assets = (idbAssets && idbAssets.length >= lsAssets.length) ? idbAssets : lsAssets;
+
+  // 5. 同步兩邊
+  await saveStorage();
+
   document.getElementById('inputDate').value = toDateStr(now);
   renderCategoryChips();
   renderPaymentChips();
   updateAll();
+
+  // 顯示載入狀態
+  if (records.length > 0 || assets.length > 0) {
+    showToast(`📂 已載入 ${records.length} 筆收支、${assets.length} 筆資產`);
+  }
 }
 
 function toDateStr(d) {
@@ -830,9 +894,12 @@ function deleteAsset(id) {
 }
 
 // ========== STORAGE ==========
-function saveStorage() {
-  localStorage.setItem('juanRecords',JSON.stringify(records));
-  localStorage.setItem('juanAssets',JSON.stringify(assets));
+async function saveStorage() {
+  // 雙重儲存：IndexedDB + localStorage
+  try { localStorage.setItem('juanRecords', JSON.stringify(records)); } catch(e) {}
+  try { localStorage.setItem('juanAssets', JSON.stringify(assets)); } catch(e) {}
+  await idbSave('records', records);
+  await idbSave('assets', assets);
 }
 
 // ========== BACKUP ==========
@@ -882,10 +949,10 @@ function importData(e) {
   reader.readAsText(file);
 }
 
-function clearAllData() {
+async function clearAllData() {
   if(!confirm('⚠️ 確定要清除所有資料嗎？\n建議先匯出備份！'))return;
   if(!confirm('真的確定嗎？資料刪除後無法復原！'))return;
-  records=[]; assets=[]; saveStorage(); updateAll(); renderAssets(); closeModal('backup'); showToast('🗑️ 已清除');
+  records=[]; assets=[]; await saveStorage(); updateAll(); renderAssets(); closeModal('backup'); showToast('🗑️ 已清除');
 }
 
 // ========== TOAST ==========
